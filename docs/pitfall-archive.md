@@ -1,0 +1,229 @@
+# 踩坑档案 · PowerTokens 视频 Skill 开发全记录
+
+> **对齐版本：powertokens-video `0.3.0`（图文通用 · 直连官方 REST，零 CLI / 零 Node 依赖）**
+> 周期：2026-09-28 ~ 10-26（REST 直连 + 图片路由 + Seedance 协议 → 0.4.0 拆为独立类型）
+> 引擎：`pt_video.py` · 配置：`~/.config/powertokens-video/config.json`（可用 `PT_VIDEO_CONFIG` 覆盖）
+> 真实出片：**视频 1 次**（wan3.0-video · 480p · 5s · 2.1MB）+ **图片 1 次**（image-01 · 1:1 · 245KB）
+> 单测：**0 项**（尚未补，见 B 层「已知短板」）
+> 接口：视频 `POST /v1/videos` 提交 + 轮询；图片 `POST /v1/images/generations`（同步，不轮询）
+>
+> ⚠️ 本档案是**对照 0.2.0 真实代码与实测结果校正过的版本**。与旧版（powertokens-wan 档案）的差异见文末「校正说明」。
+
+---
+
+## ⚡ 五条最值钱的通用教训
+
+1. **第三方网关的文档枚举不可信，必须实测真实响应。** 成功态 `succeeded`/`completed` 写法不一；无效 Key 的报错形态需拿假 Key 打一次确认。
+2. **轮询逻辑必须对「查询失败」和「状态读不出」显式处理。** 0.2.0 当前**尚未做熔断**（见 B 层已知短板），长视频轮询遇网关抖动可能静默空转。
+3. **HTTP 状态码语义会被重载。** 403 同时表示「余额不足 / 无权使用模型 / Key 失效」三种不同问题，顺序写错会把用户引向死路。
+4. **限流（429）与服务器错误（5xx）不宜共用阈值。** 429 是暂时的、退避后大概率恢复；5xx 才该快速失败。
+5. **改同一文件禁止并行 Edit，改用原子批量替换脚本。** 并发写同文件会静默丢写（返回 success 但磁盘没改）。
+6. **视频/图片端点形态与同步异步差异不能想当然。** 图片是 `POST /v1/images/generations` 同步返回 `data[].url`，视频是 `POST /v1/videos` 异步轮询 task_id——盲猜 `/v1/images` 会吃 404（见 A.12）。第三方模型的「协议/白名单/素材格式」前置条件往往只能仪表盘手动处理，skill 应「检测 + 引导」而非「代签」（见 A.13）。
+
+---
+
+## A. PT 网关 / API 认知类（文档不可信）
+
+这一层共同特征：**官方文档与网关真实行为不一致，或状态码语义被重载**。只能靠实测取证。
+
+### A.01 成功态枚举写法不一：`succeeded` / `completed` 都可能出现
+- **现象**：长视频生成时日志一直停在「排队中」，但 PT 后台任务早就完成了，客户端卡着不动。
+- **根因**：官方提交页示例写 `succeeded`，查询页示例写 `completed`——不同文档页 / 不同模型写法不一，**没有统一契约**。
+- **实测（0.2.0）**：我们这轮 REST 实测（wan3.0-video 480p）查询返回的状态链是 `queued → in_progress(30%) → succeeded`，最终在 `metadata.url` 拿到视频——**返回的是 `succeeded`，不是 `completed`**。旧档案称「网关实际返回 completed」与我们实测相反，特此更正。
+- **解法（已实现）**：多路兜底——① 提取到 `metadata.url` 即判成功（最强信号，无视 status 写法）② `status` 命中成功词表（`succeeded/completed/finished/done/ready`）③ `progress≥100`。`pt_video.py` 的 `poll_task` 已实现 ①②（`succeeded`/`completed` 都认）。
+- **教训**：判定成功别只信单一字段。「拿到产物地址」是比「状态字段等于某个词」强得多的信号。
+
+### A.02 查询返回非 200 时旧逻辑会空转 —— ⚠️ 0.2.0 已知短板（未做熔断）
+- **现象 / 根因**：若 `GET /v1/videos/{id}` 反复返回 429/500/502/503，响应体就没有 `status` → 状态变量变空 → 既不匹配成功、也不匹配失败 → 继续 `sleep` 轮询，一路空转到 `POLL_TIMEOUT`（当前 600s）。日志看起来「一切正常，只是在排队」。
+- **当前状态**：0.2.0 的 `poll_task` 仅做「超时抛错 + 提示稍后单独 `GET` 复查」，**没有** 429 退避、5xx 计数熔断、未识别状态计数熔断。这是已知短板，长视频轮询遇网关抖动可能静默空转。
+- **解法（路线图，尚未实现）**：加三重熔断——连续 8 次 5xx 失败退出；`status` 读不出 / 未识别值计数 40 次熔断并打印原始响应；429 单独计数 + 指数退避（间隔翻倍，上限 60s）。
+- **教训**：「静默继续」是轮询逻辑最危险的默认分支。任何「读不出状态」都必须显式计数 + 熔断。
+
+### A.03 429 与 5xx 不宜共用严阈值（同 A.02 路线图）
+- **现象（推演）**：修 A.02 时若把 429 和 5xx 一起计入同一严阈值，会在任务正常生成途中误杀（长视频轮询几十次极易撞限流）。
+- **解法（路线图）**：429 单独计数、阈值放宽到 30 次 + 指数退避；5xx 用严阈值快速失败；查询成功时两个计数器都重置。
+- **教训**：可恢复错误与不可恢复错误的熔断策略必须分开。
+
+### A.04 403 语义重载：余额不足 / 无权 / Key 失效 三选一（真实，我们实测遇到）
+- **现象**：余额不足时报 403，信息形如 `token quota is not enough ... need quota: ＄0.200000`（我们这轮 720p 提交即触发）。
+- **根因**：同一 403 承载三种语义：余额不足 / 无权使用模型 / Key 失效。顺序写错会把「没开模型权限」误报成「Key 已失效」。
+- **解法（当前实现）**：0.2.0 **未做细分类**（`classify_rest` 未实现），统一走 `[error] 生成失败：{message}` 把网关原文**透传**给用户 / agent——至少不误导方向。建议后续按「先具体特征（`token_invalid` / `quota` / `not permitted`）后状态码兜底」重排。
+- **教训**：错误分类的价值不在分类本身，而在把用户引向正确修复路径；当前实现靠用户 / agent 读原文。
+
+### A.05 无效 Key 的报错形态 —— ⚠️ 待实测（0.2.0 未验证）
+- **说明**：我们这轮只用了**真实 Key**，没拿假 Key 打 REST 端点，无法证实「HTTP 500 + `token_invalid`」这一传闻。鉴权用 `Authorization: Bearer <token>`，实测可用。
+- **建议**：接新网关第一件事——拿一个假 Key 打一次 `POST /v1/videos`，记录真实返回（状态码 + body），再补进分类器。旧档案把此条写成「已确认事实」，此处降为「待实测」。
+
+### A.06 `GET /v1/models` 返回的是「该令牌被授权的模型」，不是全局目录
+- **现象**：同事的 Key 不限制模型时正常出片；一旦在后台开了模型白名单（哪怕已勾 wan3），生成就报「key 没有权限」。
+- **根因**：`/v1/models` 反映该 Key 的可用模型（白名单**精确字符串匹配**）。后台勾选项显示名（如「Wan 3.0」）与真实 ID（`wan3.0-video`）易不一致。
+- **实测（0.2.0）**：我们实测新 Key 返回 **32 个视频模型**（口径：仅 video 类型；若含全部类型会更多，**需注明口径**）。旧档案写「85 个」未注明口径，此处更正为实测值。
+- **解法（已实现）**：提交前 `precheck`——显式 `-m` 先与 `/v1/models` 比对，不在则 1 秒内 `exit 3`、不进生成、不扣费，并给相近候选 + 大小写纠正（`pt_video.py` 的 `precheck_explicit_model` 已实现）。注意：当前实现是「模型不存在则报错退出」，**不是**「跳过该 Key 换下一个」。
+
+### A.07 「PT 有 900s 硬上限」是误判 —— 异步生成服务端无上限（真实，用户纠正）
+- **现象**：同事截图里跑到 908s 失败，曾被推断「PT 侧有 900s 任务上限」。
+- **根因**：908s 是**客户端轮询放弃的时刻**，不是 PT 的限制。用户明确纠正：生成是异步的，没有 900s 上限。
+- **解法（已实现）**：`pt_video.py` 提交 HTTP 超时 **120s**（按用户要求）、轮询间隔 **10s**（按用户要求）、整体轮询总上限 **600s**（仅为防无限轮询，**非 PT 限制**；真实出片约 3 分钟，120s 总上限会失败，故默认 600s，可 `--timeout` 调）。文案统一为「本地轮询守护超时，服务端无硬上限」。
+- **教训**：看到超时数字，先分清是「谁超时了」。客户端守护 / 网关 / 上游模型三层各有各的超时。
+
+### A.08 「无可用渠道」多为瞬时故障，不是用户 Key 问题
+- **现象**：生成报「无可用渠道 / 未指定模型 / 该令牌无权使用模型」，看起来像用户配置问题。
+- **根因**：两道关——① 令牌层（Key 是否绑模型白名单）→ 报「无权使用模型」；② 渠道路由层（网关能否找到「支持该模型 + 有余额 + 未禁用」的上游）→ 报「无可用渠道」。绝大多数是 ②，属瞬时故障。
+- **解法（建议）**：先 `models` 确认模型在可用列表，再用完全相同的命令复现。话术要明确告诉用户「不是你的 Key 问题」，别让用户去改配置白折腾。
+
+### A.09 无余额查询接口，消耗只能估算（真实，`estimate` 已实现）
+- **现象**：想报「本次花了多少钱」，成功路径不返回消耗金额。
+- **根因**：PT 按美元钱包计费、视频提交即预扣，但 `/v1/dashboard/billing/*` 全 404、无可编程查余额的公开接口。
+- **解法（已实现）**：用**真实探测的预扣单价表**估算并明确标注「估算」。单价表零成本建成——余额不足时提交必 403 但**不扣费**，而 403 会返回该模型的 `required pre-consume` 真实预扣额。系数：时长线性、1080p = 720p ×2。未知模型打印「未知」，绝不瞎编数字（`pt_video.py` 的 `estimate_cost` 已实现）。
+- **教训**：拿不到的真值宁可标「估算 / 未知」，也不要编。
+
+### A.10 `media` 只收 http(s) URL；`@xxx` 占位符不识别
+- **现象**：① 用户想直接传本地截图 / 图片生成视频；② prompt 里写 `@male_lead` 想锁角色，出来却是通用形象。
+- **根因**：① REST 接口不接收本地文件上传，`media[].url` 必须是公网可访问地址；② wan3.0 不识别 `@xxx` 占位符语法。
+- **解法（已实现）**：本地路径直接报错并说明原因（前置防护，避免提交后才失败白扣时间）；锁角色走 `--ref-image` / `--first-frame` 等 `media` 数组类型。注意 `reference_*` 与 `first_frame`/`last_frame` 互斥，不能混用。
+- **教训**：参数校验要前置到提交之前；模型不认的语法要提前告知替代方案。
+
+### A.11【新增 · 致命】请求体枚举字段必须传字符串（我们这轮真踩，旧档案遗漏）
+- **现象**：第一次提交直接报错：`json: cannot unmarshal number into Go struct field .seconds of type string`。
+- **根因**：`seconds` 是 `enum<string>`，`size`（480P/720P/1080P）、`ratio`（adaptive/16:9/...）、`model` 同为**字符串枚举**。传整数 / 小写会被服务端拒。
+- **解法（已实现）**：`pt_video.py` 提交时 `"seconds": str(args.duration)`、`"size": args.resolution.upper()`、`ratio` / `model` 均为字符串，再 `json.dumps`。所有枚举字段统一转 `str`。
+- **教训**：REST 提交前，先用 `models --json` 或官方文档确认每个字段的类型——**枚举字段宁可显式转字符串**，这是最易踩、最可复现的坑。
+
+---
+
+### A.12【新增 · 0.3.0】图片端点不是 `/v1/images`，是 `/v1/images/generations`（同步，不轮询）
+- **现象**：按视频端点类比猜 `POST /v1/images`（无 `/generations`），返回 `404 Invalid URL (POST /v1/images)`；文档页写的是 `POST /v1/images`，但实际网关不认（文档与实际不一致，同 A 层老问题）。
+- **根因**：PT 图片接口是 OpenAI 风格，带 `/generations` 后缀：`POST /v1/images/generations`。且图片是**同步返回**——响应体 `data[].url`（数组，可多张），直接拿到链接，**不需要轮询**（和视频的异步 task_id 轮询完全不同）。
+- **实测（0.3.0）**：`POST /v1/images/generations` 带 `{"model":"image-01","prompt":"x"}` 返回 HTTP 200 + `{"data":[{"url":"http://...aliyuncs.com/...jpeg?Expires=...&Signature=..."}],"metadata":{"success_count":1,...}}`——已真生成并下载到 `out/test_image.png`（245KB）。
+- **解法（已实现）**：`generate_image` 走 `IMAGE_ENDPOINT="/v1/images/generations"`，同步取 `data[].url` 逐张下载（扩展名 .png），不轮询。图片字段用 `aspect_ratio`(枚举串)/`n`(1-9)/`seed`，**没有 `seconds`**（图片无时长）。
+- **教训**：视频/图片端点形态、同步异步差异巨大，绝不能共用一套提交+轮询逻辑；先实测端点再写代码（我们盲猜 `/v1/images` 吃了 404）。
+
+### A.13【新增 · 0.3.0 → 0.4.0/0.4.1】Seedance 拆为独立类型：普通 video 不含它 + 资产库 asset:// + 本地标记开通流程
+- **现象（0.3.0 误判，已纠正）**：早期用 `dreamina-seedance-2-0-260128` 文生视频，传**假** `asset://` 占位符，
+  报 `BytePlus video models only accept media`，于是误以为「Seedance 文生视频必须带 media、纯 prompt 不行」。
+  **这是误判**：报错根因是 asset id 是假的，不是缺 media。
+- **根因（经真实 key 实测澄清，2026-10-26）**：① Seedance 2.0 需先签《Asset Library User Agreement》，
+  但**只能仪表盘手动签**（`https://powertokens.ai/assets-library?tab=1`），**无 API 端点可程序化签署**；
+  ② 图生视频的素材须经资产库上传拿 `asset://<ASSET_ID>` 传入（非普通 http URL）；③ **文生视频只需 prompt，
+  不需要任何 media**——提交时由 skill 把 prompt 放进 `media:[{type:text, text:...}]`（服务端不认顶层 `prompt`）；
+  ④ 它有三个独有前置门槛（签协议 / 素材走资产库 / 文生靠 media-text 而非顶层 prompt），与普通视频模型系统性
+  不同——折进 `video` 类型并不合理，故提升为独立类型。
+- **解法（0.4.0/0.4.1 重构，已实现）**：把 Seedance 拆为**第三种独立类型** `seedance`（与 `image`/`video` 并列）：
+  - `is_video_model` 不再识别 seedance；`kind_of_model` 增加 `seedance` 分支；`--type` 增加 `seedance`；
+  - 普通 `video` 的 `AUTO_PRIORITY_VIDEO` 剔除 seedance，`auto` 不会误选它；Seedance 走自己的 `AUTO_PRIORITY_SEEDANCE`；
+  - `generate_video(force_asset=True)`：文生视频把 prompt 放进 `media:[{type:text}]`；只在用户**传了图/视频媒体**时
+    才要求 `asset://`（`build_media(force_asset=True)` 对 http(s) 前置拒绝），纯 prompt 文生视频不触发该校验；
+  - 协议开通流程「**本地标记 + 报错回退**」：`seedance_enable_flow` 未标记时弹 4 步「跳转 PT 开通」引导（不阻断）；
+    `python pt_video.py seedance enable|disable|status` 管理本地标记；`is_agreement_error` 命中服务端「未签」关键词时
+    `reset_seedance_signed` 并重新弹引导；首次成功生成后 `mark_seedance_signed`；
+  - **资产上传闭环**：`python pt_video.py upload -f 图.png`（免费）走 `POST powertokens.ai/api/.../upload` 拿
+    `task_id` → 轮询 `get-asset-id` 返回 `asset_id`，引用为 `asset://<id>`，供图生视频 `--first-frame` 使用。
+- **实测（0.4.1，真实 key `...3eu2` 已签协议、80 credits）**：
+  - `models -t seedance`：返回 7 个 seedance 模型均 `available=yes`；最便宜 `seedance-1-5-pro-251215`；
+  - **文生视频** `generate --type seedance -m seedance-1-5-pro-251215 -p "a cat walking"`：服务端接受 media-text 提交，
+    走到 `pre-consume quota failed`（余额 $0.08 < 预扣 $0.247），**证明链路通、不报协议错也不报 media 错**；
+  - **upload**：`upload -f 图.png` 免费拿到真 asset_id `asset-20261026180014-bc47m`；
+  - **图生视频** `generate --type seedance -m seedance-1-5-pro-251215 --first-frame asset://真id`：服务端接受真 asset，
+    同样走到 `pre-consume quota failed`（**无 asset 错误**，证明真 asset 被接受）；
+  - 全程**未扣 credits**（失败都在预扣费校验前）。
+- **结论**：Seedance 端到端链路 100% 打通（协议✓、文生 media-text✓、图生真 asset✓、上传闭环✓），仅差充值。
+- **教训**：① 第三方模型的「协议/白名单/素材格式」前置条件往往只能仪表盘手动处理，skill 应「检测 + 引导」而非「代签」；
+  ② 当某模型约束与普通同类系统性不同时，应提升为独立类型而非打补丁；③ **不要把一次报错直接当成模型约束**——
+  当初的 `only accept media` 是假 asset 触发的，纯 prompt 文生视频其实可行，必须换真 key 实测才能下结论。
+
+### A.14【新增 · 0.4.1】PT 资产 id（asset://）跨账户可用、无读路径隔离
+- **现象/问题**：用户给第二个 key（账户 B，末 4 位 `8EWG`，非账户 A），问「账户 A 上传的 asset id 能否在账户 B 的 key 下生成」。
+- **实测（真实双账户）**：用账户 A 上传的真 asset `asset-20261026180014-bc47m` 作首帧，拿账户 B 的 key 提交
+  `generate --type seedance -m seedance-1-5-pro-251215 --first-frame asset://asset-20261026180014-bc47m`：
+  服务端接受跨账户 asset，**生成任务完整跑完**（in_progress 50% → 返回 result 链接 `task_aayPol2v2RbrlHSmNFImRzqTXDFud3KZ.mp4`），
+  消耗记在账户 B 上。即 **asset:// id 是全局可解析、跨账户可读的共享引用**。
+- **安全含义**：① PT 资产库**不做账户级读隔离**——任何知道 asset id 的人都能在自有 key 下引用它做生成（只要过 pre-consume）；
+  ② 因此不要把涉密 / PII 内容放进 asset 指望账户隔离，**asset id 应视作「不可猜测但可共享」的 token**；
+  ③ 这也意味着「共享素材库 / 团队协作上传一次多人生成」是平台原生支持的能力，可在产品里利用。
+- **附带观察（下载链路）**：该 result 视频 URL 在本沙箱直连 + 经代理均返回 `403 Forbidden`（R2 桶对直连 GET 拒，热链/访问策略所致），
+  与跨账户无关、非引擎 bug（引擎 `poll_task` 第 679 行完整取 PT 返回的 `metadata.url`，seedance 给的是裸链接无签名 query）。
+  生成任务 server-side 完成即为铁证；结果文件能否经裸 URL 公网下载需另查（可能与桶的 Referer/签名策略有关）。
+- **处置**：本发现不影响 skill 代码（asset 引用行为符合文档预期）；仅作为安全/产品注意事项沉淀。
+
+---
+
+## B. 异步 / 轮询逻辑设计类（通用模式 + 0.2.0 已知短板）
+
+抽离出 PT 场景也成立的通用教训——任何「提交任务 + 轮询取结果」的异步对接都会遇到。
+
+| # | 坑 | 正确做法 | 0.2.0 状态 |
+|---|---|---|---|
+| 11 | 成功判定只信 `status` 字段 | 多路兜底：拿到产物 URL > status 词表 > progress≥100；递归提取字段，兼容 `data/result/task` 包裹与别名键 | ✅ 已实现（URL + 词表） |
+| 12 | 「读不出状态」被当成「还没好」 | 三种情况显式计数熔断：查询非 200 / status 缺失 / status 未识别；熔断时打印原始响应 | ⚠️ 仅超时抛错，**未做熔断**（已知短板，见 A.02） |
+| 13 | 可恢复 / 不可恢复错误同阈值 | 429 单独计数 + 退避；5xx 严阈值；查询成功两计数器都重置 | ⚠️ 未实现（路线图，见 A.03） |
+| 14 | 任务卡住就重新生成 | 先跑只读诊断复查真实状态（当前 0.2.0 **无 `status` 子命令**，需手动 `GET /v1/videos/{id}`），若已完成直接取 URL 下载，别重新提交 | ⚠️ 手动替代，子命令待补 |
+
+---
+
+## C. 本机环境 / 工具类（Windows + WorkBuddy 沙箱，已验证）
+
+这一层最磨人——工具本身时好时坏，且失败方式很安静（报 success 但没生效）。核心策略：**结果写文件再 Read**。
+
+- **C.15 同文件并行 Edit 静默丢写（致命）**：一次发 4 条 Edit 改同文件，只有 2 条落盘、另 2 条静默失败，工具返回仍是 success。解法：改用 Python 原子批量替换脚本（先备份 → 逐条断言命中 1 次 → 全中才写回 → 任一失败回滚）。**跨不同文件时并行才安全**。
+- **C.16 Bash PATH 损坏**：`dirname: command not found` / `head: command not found` / exit 127。解法：命令开头显式补全 `PATH`；Python/Node 用绝对路径；`tail/grep/mv` 常不可用 → 输出重定向文件再 Read、移动用 `os.rename`、匹配用 Grep 工具。
+- **C.17 PowerShell 偶尔不回显 stdout**：exit 0 但零输出。解法：结果一律 `Out-File` 落盘再 Read。
+- **C.18 PowerShell 中文 GBK 乱码**：`-Encoding utf8` 也乱。解法：设 `$env:PYTHONIOENCODING="utf-8"`；诊断输出把关键结论放 ASCII 字段（exit code / JSON key / 数字）。
+- **C.19 当前模型不支持读图**：用户贴截图报错 `does not support reading images`。铁律：**绝不凭想象描述截图内容**，必须明说「我看不到」，改用代码 / HTTP 实测定位，或请用户贴纯文本。
+- **C.20 `/tmp` 在 Windows 不可见**：日志写工作区绝对路径。
+- **C.21 假 API key 字面量被安全过滤截断**：`sk-test-...` 实际发出去只剩 3 字符，误判「Key 太短」。解法：程序化构造测试假凭据，避开真实格式特征。
+- **C.22 curl 对 localhost 走代理**：探测本地服务加 `--noproxy '*'`。
+- **C.23 长命令前台被超时 SIGTERM 杀**：视频生成 3~8 分钟，前台极易被杀。解法：生成任务一律 `run_in_background: true`，完成后回看结果再答复。注意 `dangerouslyDisableSandbox` 对后台任务不生效。
+
+---
+
+## D. git 沙箱类（跨项目通用，已验证）
+
+WorkBuddy 沙箱里 **git 的 loose ref 写入不落盘**是一切怪象总根源。核心策略：**绕开一切会动 ref 的 git 命令**。
+
+- **D.24 push 凭据失败**：`could not read Username: terminal prompts disabled`。解法：命令行临时改用 `gh` 凭据助手，不写持久配置。
+- **D.25 loose ref 写入不落盘**：`rev-parse HEAD` 报 unknown revision。解法：`git write-tree` + `commit-tree -p <parent>` 生成 commit 对象，再用 `fs.writeFileSync('.git/refs/heads/<br>', sha+'\n')` 手写 ref（建父目录后再写）。
+- **D.26 `reset --hard` 破坏更隐蔽**：先删 ref 再重写，重写不落盘 → 分支 ref 消失。解法：用 Node 重写 ref + HEAD，再 `git read-tree` 修 index，别再用 `reset --hard`。
+- **D.27 远程跟踪 ref `origin/*` 也会丢**：用本地分支 ref 或 commit SHA 合并（`merge --no-ff <sha>`）。
+- **D.28 checkout/merge 偶发漏写工作树**：用 `git checkout -f -- .` 从 index 重建（不写 ref）。
+- **D.29 拿陈旧本地 ref 做历史判定 → 假结论**：❌ 禁止 `git log origin/xxx | grep`；✅ 用不可变 SHA + `git merge-base --is-ancestor <sha> <实时 tip>`（tip 来自 `git ls-remote`）。
+- **D.30 `ls-tree` 不加 `-r` 列目录回显为空**：加 `-r` 递归列出；交叉验证组合 `ls-tree -r` + `diff --name-only` + `cat-file -t`。
+- **D.31 与其他 agent 共用工作目录**：用「零接触提交」（临时 index + commit-tree + SHA refspec 推送）。
+- **D.32 校验文件一致性直接比字节数 → 误判**：先归一化行尾（CRLF→LF）再比。
+
+---
+
+## E. 分发 / 安全类
+
+skill 要给不会代码的同事用，「安全」和「零门槛」是两条硬约束。
+
+- **E.33 config 文件不能进分发包（Key 泄漏）**：Key 存 `~/.config/powertokens-video/config.json`，若打包进 zip 等于把 Key 明文送人。解法：config 与 skill 包分离，zip 只含 `SKILL.md` / `pt_video.py` / `mcp_server.py` / `README.md` 四件；每次打包后必做泄漏扫描（`grep` Key 片段，命中数必须为 0）；config 权限 0600。
+- **E.34 同事不会代码 → 不让用户跑任何命令**：确立「用户全程只用说话，命令一律由 agent 代跑」——对话里识别 `sk-pt-` 开头字符串 → agent 自己 `config --set-key` → `check` 回显池状态 → 直接干活。SKILL.md 明确禁止让用户跑命令 / 编辑文件 / 设环境变量。
+- **E.35 「同事没装 Python」是伪问题**：WorkBuddy 客户端自带托管 Python/Node 运行时。后续彻底去 CLI 改纯 REST 后，连 Node 依赖也去掉了——只要 Python 3.9+。少一层依赖少一类故障。
+
+---
+
+## F. 协作 / 流程类（用户明确要求）
+
+这些不是技术 bug，是协作边界——踩了会直接消耗信任。
+
+- **F.36 代码改动先讨论后动手**：方案聊清楚再改；但明确的 bug 修复倾向直接动手。本项目多次遵守：用户问「先回复我，同意后再修改」→ 先给方案评估，等确认才动手。
+- **F.37 运行中的服务不碰**：dsh 之类进程的重启 / 杀进程 / 改配置一律先征得明确确认，优先只读诊断、非侵入式动作。
+- **F.38 范围要守住 + 证据先行**：说单站点就只在单站点内诊断；排障走四段式（每步配证据 → 推结论 → 当前状态 / 目标 / 对比 / 建议），不做脱离证据的泛化判断。A.07（900s 误判）、D.29（陈旧 ref 假结论）都是违反证据先行的代价。
+
+---
+
+## 校正说明（本版 vs 旧版 powertokens-wan 档案）
+
+| # | 旧版问题 | 本版校正 |
+|---|---|---|
+| 1 | **漏坑**：完全没提 `seconds` / `size` / `ratio` / `model` 须传字符串 | 新增 **A.11**，记录我们这轮真实报的 `cannot unmarshal number into ... .seconds of type string` |
+| 2 | A.01 称「网关实际返回 `completed`」 | 我们实测返回 `succeeded`，更正为「写法不一，多路兜底」 |
+| 3 | 项目名 `powertokens-wan`、版本 0.1.2、26 单测、4 出片、`pt_wan.py`、`~/.config/powertokens-wan/` | 对齐 **powertokens-video 0.2.0**、0 单测、1 出片、`pt_video.py`、`~/.config/powertokens-video/` |
+| 4 | A.05 把「无效 Key 返 500+token_invalid」当已确认事实；A.06「85 个模型」未注口径 | A.05 降为**待实测**；A.06 改为我们实测 **32 个视频模型**并注明口径 |
+| 5 | 把 `classify_rest` / `rest_poll` 三重熔断 / `fetch_model_ids` / `ensure_model_allowed` / `status` 子命令写成「已落地」 | 0.2.0 实际只有简单轮询 + `precheck_explicit_model`；上述高级能力改为**已知短板 / 路线图**，不谎称已实现 |
+| 6 | 旧版仅覆盖视频（0.2.0） | 0.3.0 扩展为**图文通用**：图片端点 `POST /v1/images/generations` 同步（A.12）、Seedance Asset Library 协议 + BytePlus media 前置（A.13）；真实出片新增图片 1 次（image-01） |
+
+---
+
+*踩坑档案 · 校正于 2026-10-26 · 阿伴 🦝*
+*诊断工具留存：`pt_video.py`（引擎）· `mcp_server.py`（MCP 壳）· `README.md`（安装）· `docs/publish.md`（发布）*

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "powertokens-video"
+version = "0.4.1"
+description = "Generate videos from PowerTokens models (Seedance/Kling/Wan/MiniMax Hailuo/Vidu/HappyHorse) via a tool-agnostic CLI and MCP server — portable across Claude Code, Cursor, Trae, VS Code, Windsurf, Cline, Zed and more."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp[cli]>=1.2"]
+
+[project.scripts]
+pt-video = "pt_video:main"
+
+[project.urls]
+Homepage = "https://github.com/tjj1234/powertokens-video"
+Repository = "https://github.com/tjj1234/powertokens-video"
+Documentation = "https://powertokens.ai/"
+
+[tool.setuptools]
+py-modules = ["pt_video", "mcp_server"]

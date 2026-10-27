@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Local runtime artifacts (never commit secrets or generated media)
+vendor/
+config.json
+.env
+.pt_cache/
+out/
+*.mp4
+*.png
+*.jpg
+*.log
+.DS_Store
