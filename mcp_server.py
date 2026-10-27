@@ -18,7 +18,7 @@ PowerTokens 图片 + 视频生成 —— MCP server（FastMCP）。
   estimate_cost    —— 仅估算某次生成的消耗（美元）
   generate_video   —— 生成视频（异步：提交后自动轮询直到拿到链接；默认 auto）
   generate_image   —— 生成图片（同步：提交后直接返回 data[].url；默认 auto）
-  generate_seedance —— 生成 Seedance 2.0 视频（独立类型：需签协议 + asset:// 素材）
+  generate_seedance —— 生成 Seedance 视频（全系 1.0/1.5/2.0/2.5；独立类型：需签协议 + asset:// 素材）
 
 运行：
   python mcp_server.py            # stdio（最常用，agent 客户端自动拉起）
@@ -134,7 +134,7 @@ def generate_image(prompt: str, model: str = "auto", aspect_ratio: str = "1:1",
 def generate_seedance(prompt: str, model: str = "auto", duration_s: int = 5,
                       resolution: str = "720p", first_frame: str = "",
                       output: str = "", timeout_s: int = 600) -> str:
-    """生成 Seedance 2.0 视频（独立类型：需先签《Asset Library User Agreement》）。prompt 必填；model 可写 seedance 模型 ID 或 auto（默认 seedance-1-5-pro-251215）；duration_s 时长秒（2-30）；resolution 720p/1080p；first_frame 资产库素材 asset://<ASSET_ID>（可选——文生视频可留空，仅图生视频/参考图需要，用 upload 子命令免费拿 id）；output 输出路径（可选）。返回 JSON：ok / kind / task_id / url / output。未签协议会提示跳转 PT 开通（python pt_video.py seedance enable 标记已签）。"""
+    """生成 Seedance 视频（全系：1.0/1.5/2.0/2.5 及 Mini/Fast 变体，模型 ID 含 seedance 即归此类型；需先签《Asset Library User Agreement》）。prompt 必填；model 可写 seedance 模型 ID 或 auto（默认 seedance-1-5-pro-251215）；duration_s 时长秒（2-30）；resolution 720p/1080p；first_frame 资产库素材 asset://<ASSET_ID>（可选——文生视频可留空，仅图生视频/参考图需要，用 upload 子命令免费拿 id）；output 输出路径（可选）。返回 JSON：ok / kind / task_id / url / output。未签协议会提示跳转 PT 开通（python pt_video.py seedance enable 标记已签）。"""
     args = ["generate", "--json", "--type", "seedance", "-p", prompt, "-m", model,
             "-d", str(duration_s), "-r", resolution, "--timeout", str(timeout_s)]
     if first_frame:

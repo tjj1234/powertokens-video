@@ -36,7 +36,7 @@ PowerTokens 图片 + 视频生成 —— 跨 agent 工具的可移植引擎（�
   auto-model [--type image|video|seedance]  打印 auto 首选模型 ID（不生成）
   models [-t video|image|seedance|all] [--json]  列出模型 + 定价 + 支持参数
   generate -m <id|auto> -p ... [--type image|video|seedance]  提交并取回链接
-  seedance [enable|disable|status]  Seedance 2.0 协议标记管理（本地）
+  seedance [enable|disable|status]  Seedance 协议标记管理（本地，全系 1.0/1.5/2.0/2.5 通用）
   estimate -m <id> ...          仅估算消耗（美元；图片单价待补充）
 
 退出码：0=成功 2=缺 Key 3=显式模型未过预校验 1=其他失败
@@ -93,7 +93,7 @@ AUTO_MAX_TRIES = 4
 # ---------- 消耗估算（基于 PT 真实 pre-consume 单价探测；零成本建表）----------
 # 系数：时长线性（5s→10s = ×2）、1080p = 720p ×2。单位：美元（$）。
 # 视频单价已实测；图片单价待补充（生成会扣费，且当前 key 余额有限，未探测）。
-# Seedance 2.0 单价单列（走资产库协议 + asset:// 素材，与普通视频分开计价）
+# Seedance 全系单价单列（走资产库协议 + asset:// 素材，与普通视频分开计价）
 PRICE_VIDEO_5S_720P = {
     "wan3.0-video": 0.20,
     "wan3.0-video-prime": 0.70,
@@ -131,7 +131,7 @@ MODEL_CAPS = [
     ("vidu", dict(vendor="Vidu", kind="video", max_dur=10, res="720p,1080p", inputs="text, image, multi-reference", camera="—")),
     ("happyhorse", dict(vendor="HappyHorse", kind="video", max_dur=10, res="720p", inputs="text", camera="—")),
 ]
-# Seedance 2.0 独立类型：必须签 Asset Library 协议 + 素材走 asset://
+# Seedance 全系独立类型：必须签 Asset Library 协议 + 素材走 asset://
 SEEDANCE_CAPS = [
     ("seedance", dict(vendor="ByteDance Seedance", kind="seedance", max_dur=10, res="720p,1080p",
                       inputs="text, image(first-frame, asset://), start-end frames, video+audio ref",
@@ -151,7 +151,7 @@ IMAGE_MODEL_CAPS = [
 ]
 DEFAULT_CAPS = dict(vendor="unknown", kind="video", max_dur=10, res="720p,1080p", inputs="text, image", camera="—")
 
-# Seedance 2.0 需要签署 Asset Library User Agreement（仪表盘手动签，无 API 端点）
+# Seedance 全系需要签署 Asset Library User Agreement（仪表盘手动签，无 API 端点）
 SEEDANCE_AGREEMENT_URL = "https://powertokens.ai/assets-library?tab=1"
 
 
@@ -197,7 +197,7 @@ def is_image_model(mid):
 
 
 def is_seedance(mid):
-    """Seedance 2.0 视频模型需要 Asset Library 协议（素材走 asset://）。"""
+    """模型 ID 含 seedance 即归入 Seedance 独立类型（全系 1.0/1.5/2.0/2.5，含 Mini/Fast 变体）。"""
     return "seedance" in mid.lower()
 
 
@@ -864,7 +864,7 @@ def generate_image(key, model, args, timeout):
     return urls, outputs, None
 
 
-# ---------- Seedance 2.0 协议开通流程（本地标记 + 报错回退）----------
+# ---------- Seedance 协议开通流程（全系通用；本地标记 + 报错回退）----------
 # PT 没有查询「协议是否已签」的 API，只能仪表盘手动签。故用本地标记决定是否弹开通引导，
 # 并在提交被拒报「未签」时重置标记、重新弹引导（报错回退）。
 def is_agreement_error(e):
@@ -875,12 +875,12 @@ def is_agreement_error(e):
 
 
 def seedance_enable_flow(key, model):
-    """Seedance 2.0 协议：检测本地标记，未签则弹『跳转 PT 开通』流程（不阻断提交）。"""
+    """Seedance 协议（全系通用）：检测本地标记，未签则弹『跳转 PT 开通』流程（不阻断提交）。"""
     cfg = load_config()
     if cfg.get("seedance_agreement_signed"):
         return
     sys.stderr.write(
-        f"[seedance] ⚠️ 使用 Seedance 2.0 前需签署《Asset Library User Agreement》\n"
+        f"[seedance] ⚠️ 使用 Seedance（全系 1.0/1.5/2.0/2.5）前需签署《Asset Library User Agreement》\n"
         f"  ① 打开并签署协议：{SEEDANCE_AGREEMENT_URL}\n"
         f"  ② 上传素材到资产库，拿到 asset://<ASSET_ID>\n"
         f"  ③ 用 asset:// 传入媒体，例如：--first-frame asset://xxxx\n"
@@ -1050,7 +1050,7 @@ def _finish_image(model, urls, outputs, args):
 
 
 def cmd_seedance(argv):
-    """Seedance 2.0 协议标记管理：enable / disable / status（本地标记，无 API）。"""
+    """Seedance 协议标记管理（全系通用）：enable / disable / status（本地标记，无 API）。"""
     parser = argparse.ArgumentParser(prog="pt_video.py seedance")
     parser.add_argument("action", nargs="?", default="status", choices=["enable", "disable", "status"])
     args = parser.parse_args(argv)

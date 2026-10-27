@@ -91,7 +91,7 @@ python pt_video.py generate -p "赛博城市夜景" --type image --aspect-ratio 
 python pt_video.py generate -m seedream-5-0-260128 -p "赛博城市" --type image --aspect-ratio 16:9
 python pt_video.py estimate -m seedance-1-5-pro-251215 -d 5 -r 720p   # 仅估算消耗（不扣费）
 
-# Seedance 2.0（独立类型：--type seedance，需先签协议，见 §10）
+# Seedance 全系（1.0/1.5/2.0/2.5 均可，独立类型：--type seedance，需先签协议，见 §10）
 python pt_video.py models -t seedance --json
 python pt_video.py generate --type seedance -m seedance-1-5-pro-251215 -p "一只猫在草地上走" -d 5 -r 720p --no-download   # 文生视频：纯 -p 即可
 python pt_video.py upload -f ./first_frame.png                          # 上传素材拿 asset://<id>（免费）
@@ -113,7 +113,7 @@ python pt_video.py seedance enable    # 签好协议后标记，不再弹开通�
 |---|---|---|---|---|---|
 | `image` | `--type image` | 文生图 | 无 | — | 同步（`/v1/images/generations`） |
 | `video` | `--type video`（默认） | 普通视频模型（Kling / Wan / Hailuo / Vidu / HappyHorse） | 无 | `http(s)` 或 `asset://` | 异步轮询（`/v1/videos`） |
-| `seedance` | `--type seedance` | Seedance 2.0（ByteDance） | **需签《Asset Library User Agreement》** | **仅 `asset://`**（图生）；文生无需素材 | 异步轮询（`/v1/videos`） |
+| `seedance` | `--type seedance` | Seedance 全系（ByteDance：1.0/1.5/2.0/2.5，含 Mini/Fast） | **需签《Asset Library User Agreement》** | **仅 `asset://`**（图生）；文生无需素材 | 异步轮询（`/v1/videos`） |
 
 > **关键设计点**：Seedance 被拆成独立类型，而**不是**塞进普通 `video`。原因：它有三大独有前置（签协议 / 素材走资产库 `asset://` / 文生靠 `media-text` 而非顶层 `prompt`），与普通视频模型系统性不同。普通 `video` 的 `auto` 候选已剔除 Seedance，`--type seedance` 才显式走它。
 
@@ -260,7 +260,7 @@ python mcp_server.py         # stdio；agent 客户端会自动拉起
 
 ### 10.1 为什么是独立类型
 
-Seedance 2.0（ByteDance）有三个与其他视频模型**系统性不同**的前置：
+Seedance 全系模型（ByteDance，1.0 / 1.5 / 2.0 / 2.5 及 Mini/Fast 变体）有三个与其他视频模型**系统性不同**的前置：
 1. 必须签《Asset Library User Agreement》（仪表盘手签，无 API）；
 2. 图生视频的素材必须走资产库，以 `asset://<ASSET_ID>` 传入；
 3. 文生视频的 prompt 必须放进 `media:[{type:text, text:...}]`，服务端**不认顶层 `prompt` 字段**。

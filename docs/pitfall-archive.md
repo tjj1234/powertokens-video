@@ -102,8 +102,9 @@
 - **现象（0.3.0 误判，已纠正）**：早期用 `dreamina-seedance-2-0-260128` 文生视频，传**假** `asset://` 占位符，
   报 `BytePlus video models only accept media`，于是误以为「Seedance 文生视频必须带 media、纯 prompt 不行」。
   **这是误判**：报错根因是 asset id 是假的，不是缺 media。
-- **根因（经真实 key 实测澄清，2026-10-26）**：① Seedance 2.0 需先签《Asset Library User Agreement》，
-  但**只能仪表盘手动签**（`https://powertokens.ai/assets-library?tab=1`），**无 API 端点可程序化签署**；
+- **根因（经真实 key 实测澄清，2026-10-26）**：① Seedance 全系（1.0/1.5/2.0/2.5，非仅 2.0）需先签
+  《Asset Library User Agreement》，但**只能仪表盘手动签**（`https://powertokens.ai/assets-library?tab=1`），
+  **无 API 端点可程序化签署**；
   ② 图生视频的素材须经资产库上传拿 `asset://<ASSET_ID>` 传入（非普通 http URL）；③ **文生视频只需 prompt，
   不需要任何 media**——提交时由 skill 把 prompt 放进 `media:[{type:text, text:...}]`（服务端不认顶层 `prompt`）；
   ④ 它有三个独有前置门槛（签协议 / 素材走资产库 / 文生靠 media-text 而非顶层 prompt），与普通视频模型系统性

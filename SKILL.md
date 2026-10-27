@@ -11,7 +11,8 @@ description: >-
   configured; if missing, show the key-acquisition guide and stop. Default model is auto (picks from the
   user's available models); the user may name any model. The agent can list every model with its pricing
   and supported parameters via `models`. Three content types: video, image, and Seedance (a distinct type
-  for ByteDance Seedance 2.0). IMPORTANT: Seedance 2.0 requires signing the Asset Library User Agreement in
+  for the full ByteDance Seedance line: 1.0/1.5/2.0/2.5, incl. Mini/Fast variants). IMPORTANT: Seedance (all
+  versions) requires signing the Asset Library User Agreement in
   the dashboard (no API endpoint) before use and uses `--type seedance`. Text-to-video works with a plain
   prompt (the engine wraps it in media:[{type:text,...}]); image-to-video needs assets uploaded to the Asset
   Library first, passed as asset:// URLs (http(s) is rejected for image-to-video).
@@ -62,7 +63,7 @@ metadata:
    - 视频：「用 kling-v2-1-master 生成一只猫」（不写则自动选视频模型 auto）
    - 图片：「用 seedream-5-0 生成赛博城市」+ 加 --type image（不写则自动选图片模型）
    - Seedance：「用 seedance-1-5-pro 生成一段舞蹈」+ 加 --type seedance（**独立类型**，普通视频不含它）
-   ⚠️ Seedance 2.0 需先在仪表盘签《Asset Library User Agreement》；文生视频纯 prompt 即可，图生视频素材以 asset:// 传入
+   ⚠️ Seedance（全系 1.0/1.5/2.0/2.5）需先在仪表盘签《Asset Library User Agreement》；文生视频纯 prompt 即可，图生视频素材以 asset:// 传入
    （签好跑 `python pt_video.py seedance enable` 标记，之后不再弹开通引导）
 
 3️⃣ 查看所有模型与定价：跑 python pt_video.py models --json
@@ -104,7 +105,7 @@ metadata:
    ```bash
    python pt_video.py models -t video --json   # 视频模型 + 单价 + 参数
    python pt_video.py models -t image --json   # 图片模型 + 参数（单价待补充，标 n/a）
-   python pt_video.py models -t seedance --json  # Seedance 2.0 模型 + 单价 + 协议提示
+   python pt_video.py models -t seedance --json  # Seedance 全系模型 + 单价 + 协议提示
    python pt_video.py models -t all --json     # 全部
    python pt_video.py estimate -m seedance-1-5-pro-251215 -d 5 -r 720p   # 估算视频消耗
    ```
@@ -118,7 +119,7 @@ metadata:
 - **auto 是默认**，除非用户在提示词或参数里显式给了模型名。
 - **模型 ID 必须精确**（区分大小写、带日期后缀，如 `seedance-1-5-pro-251215`、`seedream-5-0-260128`）。
   用户给的近似名（如 `MiniMax-H3`）会被预校验拒绝并给出相似候选，**不要猜、不要硬凑**。
-- **Seedance 2.0 是独立类型**：它**不**属于普通 `video`，普通 `video` 的 auto 候选里已剔除 Seedance。
+- **Seedance 全系（1.0/1.5/2.0/2.5）是独立类型**：它**不**属于普通 `video`，普通 `video` 的 auto 候选里已剔除 Seedance。
   使用它必须 `--type seedance`（显式），例如 `python pt_video.py generate --type seedance -m <id> ...`。
 - **Seedance 协议开通流程（本地标记 + 报错回退）**：图生视频的素材须经资产库上传后以 `asset://<ASSET_ID>`
   传入，且使用前须在仪表盘签署《Asset Library User Agreement》（https://powertokens.ai/assets-library?tab=1，
