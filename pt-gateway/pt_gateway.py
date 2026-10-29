@@ -313,7 +313,7 @@ class ModelRegistry:
         return None
 
 
-if __name__ == "__main__":
+def _selfcheck():
     # 轻量自检（无需真实 Key）：验证状态归一化与注册表 diff 逻辑。
     assert TaskState.normalize("succeeded") == "SUCCEEDED"
     assert TaskState.normalize("running") == "RUNNING"
@@ -322,3 +322,27 @@ if __name__ == "__main__":
     ns = normalize_status(fake)
     assert ns["state"] == "SUCCEEDED" and ns["progress"] == 80 and ns["url"] == "http://x/y.mp4"
     print("pt_gateway self-check OK")
+
+
+def _cmd_sync():
+    """手动触发注册表同步（无需启动 HTTP 服务）。要求环境变量 POWERTOKENS_API_KEY 可用。"""
+    key = resolve_key()
+    if not key:
+        sys.stderr.write("ERROR: 缺少 API Key（设置 POWERTOKENS_API_KEY 或 config.json）\n")
+        sys.exit(2)
+    reg = ModelRegistry().load()
+    diff = reg.sync(key)
+    print(json.dumps(diff, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="PT Gateway 核心模块（自检 / 注册表手动同步）")
+    ap.add_argument("cmd", nargs="?", default="selfcheck",
+                    choices=["selfcheck", "sync"],
+                    help="selfcheck=状态归一化自检（默认）；sync=手动拉取 /v1/models 刷新注册表")
+    args = ap.parse_args()
+    if args.cmd == "selfcheck":
+        _selfcheck()
+    elif args.cmd == "sync":
+        _cmd_sync()

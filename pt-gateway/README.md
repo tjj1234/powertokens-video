@@ -184,3 +184,41 @@ print(gw.wait(tid))
   skill 均无记录）。`/cancel` 诚实返回 `{supported:false}`；确认端点后在此探测
   `DELETE /v1/videos/{id}` 或 `POST /v1/videos/{id}/cancel` 并实现分发。
 - 轮询仍沿用引擎的 10s 间隔 + 600s 上限（无 429 退避/5xx 熔断，见 `pt_video.py` 注释 A.02/A.03）。
+
+---
+
+## 8. 手动触发开关 + 定时同步（自动更新不产生额外负担）
+
+注册表的「自动发现新上架 / 自动下线已下架」由 §4 的 diff 兜底。**但它只在有人调用时才惰性重拉**；
+若服务长期空闲，注册表不会自己变新鲜。因此提供两种显式触发方式：
+
+### 8.1 手动触发开关（两种方式，任选）
+
+1. **终端直跑（不用起服务）** —— `pt_gateway.py` 自带 `sync` 子命令：
+   ```bash
+   python pt_gateway.py sync        # 拉 /v1/models 刷新 registry.json，打印 {added,removed,total_enabled,last_synced}
+   python pt_gateway.py selfcheck   # 状态归一化自检（默认，无需 Key）
+   ```
+   这条命令和 HTTP 服务**写入同一个** `~/.config/pt-gateway/registry.json`，所以手动刷新后服务立即可见。
+
+2. **服务内热刷新** —— 对运行中的网关发：
+   ```bash
+   curl -X POST http://localhost:8787/sync
+   ```
+
+### 8.2 定时同步（推荐 12:00 + 19:00，零资源负担）
+
+同步动作本身只是一次 `GET /v1/models`（返回几 KB JSON），服务空闲时 CPU≈0，
+**每日两次完全无感**。已用 WorkBuddy 自动化建好每日 12:00 / 19:00 的定时任务，本质是定时执行：
+
+```
+C:/Users/admin/.workbuddy/binaries/python/versions/3.13.12/python.exe ^
+  c:/Users/admin/WorkBuddy/2026-09-28-11-17-14/powertokens-video/pt-gateway/pt_gateway.py sync
+```
+
+- 若想改成**每小时**一次（同样免费），把自动化 rrule 改成 `FREQ=HOURLY;INTERVAL=1` 即可。
+- 前提：定时任务执行时需 `POWERTOKENS_API_KEY` 在环境变量中可用（与网关取 Key 方式一致）。
+  若自动化环境未带该变量，定时刷新会跳过——此时用 8.1 的手动开关在带 Key 的终端里跑即可。
+
+> 设计取舍：PT 不提供 webhook，故采用「pull 模式」——惰性重拉（调用时 ≤1h 过期即刷）+
+> 每日两次主动定时 + 手动开关三者互补，覆盖「调用中实时新鲜」与「空闲时也不陈旧」。
