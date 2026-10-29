@@ -86,6 +86,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/health"):
             return self._send(200, {"ok": True, "service": "pt-gateway"})
+        if self.path.startswith("/capabilities"):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            kind = (qs.get("kind") or [None])[0]
+            _autosync_best_effort()
+            return self._send(200, GW.list_capabilities(kind))
         if self.path.startswith("/status"):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
@@ -109,11 +115,38 @@ class Handler(BaseHTTPRequestHandler):
                 "last_synced": REGISTRY.data.get("last_synced"),
             })
         return self._send(404, {"error": "not found", "routes": [
-            "GET /health", "POST /submit", "GET /status?task_id=",
+            "GET /health", "GET /capabilities?kind=", "POST /generate",
+            "POST /submit", "GET /status?task_id=",
             "POST /wait", "POST /sync", "GET /models?kind=", "POST /cancel",
         ]})
 
     def do_POST(self):
+        if self.path.startswith("/generate"):
+            body = self._read_json()
+            try:
+                out = GW.media_generate(
+                    kind=body.get("kind"),
+                    model=body.get("model", "auto"),
+                    prompt=body.get("prompt", ""),
+                    aspect_ratio=body.get("aspect_ratio"),
+                    n=body.get("n"),
+                    duration=int(body.get("duration", 5)),
+                    resolution=body.get("resolution", "720p"),
+                    ratio=body.get("ratio", "16:9"),
+                    first_frame=body.get("first_frame"),
+                    ref_image=body.get("ref_image"),
+                    ref_video=body.get("ref_video"),
+                    no_audio=bool(body.get("no_audio", False)),
+                    no_prompt_extend=bool(body.get("no_prompt_extend", False)),
+                    watermark=bool(body.get("watermark", False)),
+                    seed=body.get("seed"),
+                    wait=bool(body.get("wait", False)),
+                    timeout=int(body.get("timeout", 600)),
+                )
+                return self._send(200, out)
+            except ApiError as e:
+                code = 401 if e.status == 401 else (400 if e.status == 0 else 502)
+                return self._send(code, {"error": str(e.message), "status": e.status})
         if self.path.startswith("/submit"):
             body = self._read_json()
             try:

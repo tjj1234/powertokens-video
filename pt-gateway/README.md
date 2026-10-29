@@ -1,11 +1,13 @@
-# PT Gateway —— 跨模型统一的异步任务接口（独立服务）
+# PT Gateway —— PT 统一媒体能力层（核心库 + HTTP 服务 + MCP 薄壳）
 
-把 PowerTokens 的**视频 / Seedance 异步生成**收敛成一个统一接口，调用方不再需要为
-「Seedance 要用 media-text + asset://」「各家返回字段位置不同」「各家轮询逻辑」各写一套。
+把 PowerTokens 的**全部媒体生成能力**（image / video / seedance / audio，含每个模型的能力档案）
+收敛成一套统一接口：agent 调 `list_capabilities` 就能拿到全部模型能力，**不用再翻文档查**；
+调 `media_generate` 一个入口即可生成，网关按 kind 自动路由（image 同步直返、video/seedance
+异步拿 task_id、audio 诚实 unsupported）。
 
 > 关键前提纠偏：PT 底层是 OneAPI 透明路由，**所有视频/Seedance 模型本来就共用**
 > `POST /v1/videos` + `GET /v1/videos/{id}`，并不存在「各家独立接口」。本服务归一化的是
-> **请求体构造差异**与**返回字段位置差异**，并补上**模型自动发现/上下架同步**。
+> **请求体构造差异**与**返回字段位置差异**，并补上**能力目录**与**模型自动发现/上下架同步**。
 
 ---
 
@@ -43,6 +45,44 @@
 ```json
 { "ok": true, "service": "pt-gateway" }
 ```
+
+### GET /capabilities?kind=<image|video|seedance|audio>
+能力目录（agent 查这个，代替翻文档）：`kinds`（各类型执行方式/端点/前置）+ `models`
+（每模型：kind、价格、时长上限、分辨率、输入模式），并叠加注册表 `registry_enabled` / `delisted` 实时状态。
+```json
+{
+  "kinds": {
+    "video": { "execution": "async", "submit": "/v1/videos", "poll": "/v1/videos/{task_id}" },
+    "audio": { "execution": "async", "submit": null, "status": "pending-endpoint",
+               "capabilities_observed": ["异步语音合成", "异步长文本语音合成（最大100万字符）", "音色设置"] }
+  },
+  "models": {
+    "seedance-1-5-pro-251215": { "kind": "seedance", "price_usd_5s_720p": 0.247,
+                                 "max_duration_s": 10, "resolutions": ["720p","1080p"],
+                                 "modes": ["text","image(first-frame)","start-end","video+audio-ref"],
+                                 "registry_enabled": true, "delisted": false }
+  }
+}
+```
+
+### POST /generate（统一媒体生成入口）
+请求体：
+```json
+{
+  "kind": "video",          // 可选；model 具体给 ID 时可省略（自动反推）
+  "model": "auto",          // auto=按 注册表优先→目录候选 自动选；或具体模型 ID
+  "prompt": "一只猫在草地上走",
+  "aspect_ratio": "16:9",   // 仅 image
+  "n": 1,                   // 仅 image
+  "duration": 5, "resolution": "720p", "ratio": "16:9",   // 仅 video/seedance
+  "first_frame": "asset://<id>", "ref_image": "", "ref_video": "",  // 可选
+  "wait": false, "timeout": 600
+}
+```
+响应按 kind 分流：
+- `image` → `{"ok":true,"kind":"image","execution":"sync","model":"...","urls":["..."]}`（同步直返）
+- `video` / `seedance` → `{"task_id":"...","kind":"...","execution":"async","model":"..."}`（用 /status 查）
+- `audio` → `{"ok":false,"kind":"audio","supported":false,"reason":"...端点未确认..."}`（诚实降级，不会假装成功）
 
 ### POST /submit
 请求体：
@@ -149,9 +189,18 @@ schema：
 
 ```bash
 cd pt-gateway
-python server.py                 # 默认 8787
+python server.py                 # HTTP 服务，默认 8787
+python mcp.py                    # MCP 薄壳（stdio；需 pip install "mcp[cli]>=1.2"）
 PT_GATEWAY_PORT=9000 python server.py
 ```
+
+MCP 客户端配置示例（把统一工具挂进 Claude/CodeBuddy/Trae）：
+```json
+{ "pt-gateway": { "command": "python", "args": ["<仓库路径>/pt-gateway/mcp.py"] } }
+```
+3 个统一工具：`list_capabilities`（查能力，代替翻文档）/ `media_generate`（统一生成入口）/
+`task_status`（查状态，wait=true 可等到终态）。MCP 与 HTTP 共用同一份 registry.json /
+catalog.json，看到的模型目录永远一致。
 
 调用示例（curl）：
 ```bash
@@ -222,3 +271,32 @@ C:/Users/admin/.workbuddy/binaries/python/versions/3.13.12/python.exe ^
 
 > 设计取舍：PT 不提供 webhook，故采用「pull 模式」——惰性重拉（调用时 ≤1h 过期即刷）+
 > 每日两次主动定时 + 手动开关三者互补，覆盖「调用中实时新鲜」与「空闲时也不陈旧」。
+
+---
+
+## 9. 统一媒体能力目录（catalog.json）——agent「不用查」的关键
+
+`catalog.json`（随仓库分发，可用 `PT_GATEWAY_CATALOG` 覆盖路径）是**人工观测固化的能力档案**：
+PT 的 `GET /v1/models` 只返回模型 ID，**不给**分辨率/时长/模式/单价这些字段——本目录把它们
+结构化存下来，`list_capabilities` 一次给全，agent 从此不再翻文档。
+
+**分工（和 ModelRegistry 的关系）**：
+
+| | 谁维护 | 管什么 |
+|---|---|---|
+| ModelRegistry（registry.json） | **自动**：sync() 拉 /v1/models 做 diff | 上下架（enabled/delisted）、is_new |
+| Catalog（catalog.json） | **人工**：实测/截图观测后补一条 | 能力字段（execution/分辨率/时长/模式/单价/前置） |
+
+两者在 `list_capabilities` 里**合并输出**：目录给「能干什么」，注册表给「现在还上不上架」。
+目录没收录的新上架模型，注册表也会自动 enable（能力字段显示缺失，诚实不编造）。
+
+schema：顶层 `kinds`（每类型的 execution/端点/前置要求/能力观测）+ `models`（每模型档案）。
+音频类（TTS）当前 `pending-endpoint`：观测到「异步语音合成 / 长文本最大 100 万字符 / 音色设置」
+等能力，但提交/轮询端点未确认——`media_generate(kind=audio)` 诚实返回 `unsupported`，
+确认端点后只需补 `kinds.audio.submit/poll` 与各 TTS 模型条目，调用方接口不变。
+
+CLI 快查：
+```bash
+python pt_gateway.py capabilities            # 打印全部能力目录
+python pt_gateway.py capabilities seedance   # 只看某类
+```

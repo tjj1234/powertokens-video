@@ -15,9 +15,12 @@ PT Task Gateway —— 跨模型统一的异步任务接口（独立模块，零
   此外 PT 当前**没有取消任务的公共端点**（官方文档 / skill 均无记录），故 cancel 本轮返回 {supported:false}。
 
 本模块职责（复用 pt_video.py 的 REST 原语，不直接依赖 CLI 子命令）：
+  - Catalog：统一媒体能力目录（catalog.json）——每模型的 kind/execution/分辨率/时长/模式/单价，
+    agent 用 list_capabilities 读取后**无需再翻文档查能力**；上下架由 ModelRegistry 自动维护。
   - TaskState：把各厂商状态动词归一化为 QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED/UNKNOWN。
   - ModelAdapter：按 kind 构造提交体（Seedance 走 media-text + asset://；video 走顶层 prompt），并统一抽取结果 URL。
-  - TaskGateway：submit / get_status / wait / cancel(占位) 四个统一方法。
+  - TaskGateway：media_generate（统一媒体生成入口，按 kind 路由：image 同步 / video·seedance 异步 / audio 诚实 unsupported）
+    + submit / get_status / wait / cancel(占位)。
   - ModelRegistry：拉 /v1/models 做 diff——新上架的异步模型自动 enable 并打 is_new，
     下架的自动 delisted；带 last_synced，超过 1 小时（对齐 PT 缓存）下次调用惰性自动重拉。
 
@@ -55,6 +58,54 @@ AUTO_PRIORITY_VIDEO = pt_video.AUTO_PRIORITY_VIDEO
 AUTO_PRIORITY_SEEDANCE = pt_video.AUTO_PRIORITY_SEEDANCE
 
 ASYNC_KINDS = ("video", "seedance")  # 走 /v1/videos 任务式轮询的类型；image 为同步，不进网关
+SYNC_KINDS = ("image",)              # 一次调用直接返回结果的类型
+KNOWN_KINDS = ("image", "video", "seedance", "audio")
+CATALOG_PATH = _HERE / "catalog.json"
+
+
+# ---------- 统一媒体能力目录 ----------
+class Catalog:
+    """能力目录（catalog.json）：每模型的 kind / execution / 分辨率 / 时长 / 模式 / 单价。
+
+    这些字段 PT 的 /v1/models **不给**，靠人工观测固化；上下架（enabled/delisted）
+    则由 ModelRegistry 自动维护，两者合起来才是完整的「模型档案」。
+    """
+
+    def __init__(self, path=None):
+        self.path = Path(path or os.environ.get("PT_GATEWAY_CATALOG", CATALOG_PATH))
+        self.data = {"kinds": {}, "models": {}}
+        self.load()
+
+    def load(self):
+        if self.path.exists():
+            try:
+                self.data = json.loads(self.path.read_text(encoding="utf-8"))
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(f"[catalog] 目录解析失败（按空目录处理）：{e}\n")
+        self.data.setdefault("kinds", {})
+        self.data.setdefault("models", {})
+        return self
+
+    def kinds(self):
+        return self.data["kinds"]
+
+    def models(self, kind=None):
+        return {m: e for m, e in self.data["models"].items()
+                if kind is None or e.get("kind") == kind}
+
+    def entry(self, model):
+        return self.data["models"].get(model) or {}
+
+    def kind_entry(self, kind):
+        return self.data["kinds"].get(kind) or {}
+
+    def capabilities(self, kind=None):
+        """list_capabilities 的数据面：kinds + models（可按 kind 过滤）。"""
+        ks = self.kinds()
+        return {
+            "kinds": ks if kind is None else {k: v for k, v in ks.items() if k == kind},
+            "models": self.models(kind),
+        }
 
 
 # ---------- 归一化状态机 ----------
@@ -145,13 +196,94 @@ def build_submit_body(model, kind, prompt, media, params):
 
 # ---------- 统一网关 ----------
 class TaskGateway:
-    def __init__(self, key=None, registry=None):
+    def __init__(self, key=None, registry=None, catalog=None):
         self.key = key or resolve_key()
         self.registry = registry or ModelRegistry()
+        self.catalog = catalog or Catalog()
 
     def _need_key(self):
         if not self.key:
             raise ApiError(401, "缺少 API Key：设置环境变量 POWERTOKENS_API_KEY 或 config.json")
+
+    def _resolve_model(self, kind, model):
+        """model=auto 时按 注册表优先 → 目录候选 的顺序选模型；返回具体模型 ID。"""
+        if model and model != "auto":
+            return model
+        mid = self.registry.auto_select(kind)
+        if mid:
+            return mid
+        cands = list(self.catalog.models(kind))
+        if cands:
+            return cands[0]
+        raise ApiError(0, f"无法为 kind={kind} 选出模型（注册表为空且目录无候选）")
+
+    # ---- 统一媒体生成入口 ----
+    def media_generate(self, kind=None, model="auto", prompt="", aspect_ratio=None, n=None,
+                       duration=5, resolution="720p", ratio="16:9", first_frame=None,
+                       ref_image=None, ref_video=None, no_audio=False, no_prompt_extend=False,
+                       watermark=False, seed=None, wait=False, timeout=POLL_TIMEOUT):
+        """统一媒体生成入口：agent 只声明意图（kind + prompt），网关按 kind 路由。
+
+        - image     → 同步 POST /v1/images/generations，返回 {execution:"sync", urls:[...]}
+        - video     → 异步 POST /v1/videos + 轮询，返回 {execution:"async", task_id}
+        - seedance  → 同 video 端点，但走 media-text 请求体 + asset:// 强制校验
+        - audio     → 诚实返回 {supported:false}（PT 音频端点未确认，catalog 标 pending-endpoint）
+        model=auto 时按注册表 → 目录候选的顺序自动选模型。
+        """
+        # 1) 解析 kind（不需要 Key；显式 kind 优先，否则从 model 反推）
+        if kind is None and model and model != "auto":
+            try:
+                kind = kind_of_model(model)
+            except Exception:
+                kind = None
+        kind = (kind or "").lower()
+        if kind not in KNOWN_KINDS:
+            raise ApiError(0, f"未知 kind={kind!r}；可用：{'/'.join(KNOWN_KINDS)}"
+                              f"（或提供具体模型 ID 由网关反推 kind）")
+
+        # 2) 音频：端点未确认，诚实降级（不需要 Key，离线也能拿到明确答复）
+        ke = self.catalog.kind_entry(kind)
+        if ke and not ke.get("submit"):
+            return {"ok": False, "kind": kind, "supported": False,
+                    "reason": f"kind={kind} 的 PT 提交/轮询端点未确认（catalog 标记 "
+                              f"pending-endpoint）；确认后在此补齐，调用方接口不变"}
+
+        self._need_key()
+
+        # 3) 图片：同步直返
+        if kind == "image":
+            model2 = self._resolve_model("image", model)
+            body = {"model": model2, "prompt": prompt or ""}
+            if aspect_ratio:
+                body["aspect_ratio"] = aspect_ratio
+            if n:
+                body["n"] = int(n)
+            sys.stderr.write(f"[gateway] POST {IMAGE_ENDPOINT} model={model2} kind=image\n")
+            resp = _api_call("POST", IMAGE_ENDPOINT, self.key, body=body, timeout=120)
+            urls = [d.get("url") for d in (resp.get("data") or []) if d.get("url")]
+            return {"ok": True, "kind": "image", "execution": "sync",
+                    "model": model2, "urls": urls, "raw": resp}
+
+        # 4) video / seedance：异步任务
+        model2 = self._resolve_model(kind, model)
+        r = self.submit(model2, prompt=prompt, duration=duration, resolution=resolution,
+                        ratio=ratio, first_frame=first_frame, ref_image=ref_image,
+                        ref_video=ref_video, no_audio=no_audio, no_prompt_extend=no_prompt_extend,
+                        watermark=watermark, seed=seed, timeout=timeout, wait=wait)
+        r["model"] = model2
+        r["execution"] = "async"
+        return r
+
+    # ---- 能力查询：agent 用这个代替翻文档 ----
+    def list_capabilities(self, kind=None):
+        """返回能力目录，并叠加注册表的 enabled/delisted 实时状态。"""
+        cap = self.catalog.capabilities(kind)
+        reg = self.registry.data.get("models", {})
+        for mid, entry in cap["models"].items():
+            r = reg.get(mid)
+            entry["registry_enabled"] = bool(r.get("enabled")) if r else None
+            entry["delisted"] = bool(r.get("delisted")) if r else None
+        return cap
 
     def submit(self, model, prompt="", duration=5, resolution="720p", ratio="16:9",
                first_frame=None, ref_image=None, ref_video=None, no_audio=False,
@@ -335,14 +467,25 @@ def _cmd_sync():
     print(json.dumps(diff, ensure_ascii=False, indent=2))
 
 
+def _cmd_capabilities(kind=None):
+    """打印能力目录（agent 查能力用这个，不用翻文档）。"""
+    cat = Catalog()
+    print(json.dumps(cat.capabilities(kind), ensure_ascii=False, indent=2))
+
+
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser(description="PT Gateway 核心模块（自检 / 注册表手动同步）")
+    ap = argparse.ArgumentParser(description="PT Gateway 核心模块（自检 / 注册表同步 / 能力目录）")
     ap.add_argument("cmd", nargs="?", default="selfcheck",
-                    choices=["selfcheck", "sync"],
-                    help="selfcheck=状态归一化自检（默认）；sync=手动拉取 /v1/models 刷新注册表")
+                    choices=["selfcheck", "sync", "capabilities"],
+                    help="selfcheck=自检（默认）；sync=手动拉 /v1/models 刷新注册表；"
+                         "capabilities=打印能力目录（可带 kind）")
+    ap.add_argument("kind_arg", nargs="?", default=None,
+                    help="capabilities 子命令的 kind 过滤（image/video/seedance/audio）")
     args = ap.parse_args()
     if args.cmd == "selfcheck":
         _selfcheck()
     elif args.cmd == "sync":
         _cmd_sync()
+    elif args.cmd == "capabilities":
+        _cmd_capabilities(args.kind_arg)

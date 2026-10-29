@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "updated": "2026-10-29",
+  "note": [
+    "PT 统一媒体能力目录：agent 通过 list_capabilities 读取，无需再翻文档查模型能力。",
+    "execution: sync=一次调用直接返回结果; async=提交拿 task_id 后轮询 task_status。",
+    "价格字段 price_usd_5s_720p 基于 5s/720p 探测（PT 预扣单价）；n/a 表示 PT 未公开，以仪表盘为准。",
+    "模型上下架由 ModelRegistry.sync() 自动维护（/v1/models diff）；本目录只维护能力档案（分辨率/时长/模式等 API 不给的字段）。",
+    "音频类端点未确认：官方文档与 powertokens-integration skill 均无音频/TTS 端点记录，先诚实标 pending-endpoint，确认后补 submit/poll 并把各 TTS 模型补进 models。"
+  ],
+  "kinds": {
+    "image": {
+      "execution": "sync",
+      "submit": "/v1/images/generations",
+      "poll": null,
+      "note": "OpenAI 风格，同步返回 data[].url，不轮询"
+    },
+    "video": {
+      "execution": "async",
+      "submit": "/v1/videos",
+      "poll": "/v1/videos/{task_id}",
+      "note": "提交拿 task_id，每 10s 轮询；素材支持 http(s) 或 asset://"
+    },
+    "seedance": {
+      "execution": "async",
+      "submit": "/v1/videos",
+      "poll": "/v1/videos/{task_id}",
+      "requires": "需签《Asset Library User Agreement》（仪表盘手动签）；文生视频 prompt 走 media-text，图生视频素材强制 asset://",
+      "note": "与 video 共用传输端点，但请求体构造不同（本网关已归一化）"
+    },
+    "audio": {
+      "execution": "async",
+      "submit": null,
+      "poll": null,
+      "status": "pending-endpoint",
+      "capabilities_observed": [
+        "异步语音合成（短文本）",
+        "异步长文本语音合成（单次最大 100 万字符）",
+        "音色设置"
+      ],
+      "note": "截图观测到的能力，但提交/轮询端点未确认；media_generate(kind=audio) 当前诚实返回 unsupported"
+    }
+  },
+  "models": {
+    "wan3.0-video": { "kind": "video", "price_usd_5s_720p": 0.20, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image"] },
+    "wan3.0-video-prime": { "kind": "video", "price_usd_5s_720p": 0.70, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image"] },
+    "wan2.7-t2v": { "kind": "video", "price_usd_5s_720p": 0.475, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image"] },
+    "kling-v3": { "kind": "video", "price_usd_5s_720p": 0.42, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image", "audio"] },
+    "kling-video-o1": { "kind": "video", "price_usd_5s_720p": 0.42, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image"] },
+    "kling-v2-1-master": { "kind": "video", "price_usd_5s_720p": 1.40, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image", "audio(运镜)"] },
+    "seedance-1-5-pro-251215": { "kind": "seedance", "price_usd_5s_720p": 0.247, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image(first-frame)", "start-end", "video+audio-ref"] },
+    "dreamina-seedance-2-0-fast-260128": { "kind": "seedance", "price_usd_5s_720p": 0.605, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image(first-frame)", "start-end", "video+audio-ref"] },
+    "dreamina-seedance-2-0-260128": { "kind": "seedance", "price_usd_5s_720p": 0.756, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image(first-frame)", "start-end", "video+audio-ref"] },
+    "dreamina-seedance-2-0-mini-260615": { "kind": "seedance", "price_usd_5s_720p": null, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image(first-frame)", "start-end", "video+audio-ref"] },
+    "dreamina-seedance-2-5-260628": { "kind": "seedance", "price_usd_5s_720p": null, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image(first-frame)", "start-end", "video+audio-ref"] },
+    "seedance-1-0-pro-fast-251015": { "kind": "seedance", "price_usd_5s_720p": null, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image(first-frame)", "start-end", "video+audio-ref"] },
+    "seedance-1-0-pro-250528": { "kind": "seedance", "price_usd_5s_720p": null, "max_duration_s": 10, "resolutions": ["720p", "1080p"], "modes": ["text", "image(first-frame)", "start-end", "video+audio-ref"] },
+    "seedream-5-0-260128": { "kind": "image", "price": null, "aspect_ratios": ["1:1", "16:9", "4:3", "3:2", "2:3", "3:4", "9:16", "21:9"], "modes": ["text"], "note": "image 类 auto 默认" },
+    "qwen-image": { "kind": "image", "price": null, "aspect_ratios": ["1:1", "16:9", "4:3", "3:2", "2:3", "3:4", "9:16", "21:9"], "modes": ["text"] },
+    "image-01": { "kind": "image", "price": null, "aspect_ratios": ["1:1", "16:9", "4:3", "3:2", "2:3", "3:4", "9:16", "21:9"], "modes": ["text"] },
+    "kling-image": { "kind": "image", "price": null, "aspect_ratios": ["1:1", "16:9", "4:3", "3:2", "2:3", "3:4", "9:16", "21:9"], "modes": ["text"] }
+  }
+}
