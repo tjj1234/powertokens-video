@@ -16,3 +16,8 @@ out/
 *.jpg
 *.log
 .DS_Store
+
+# PT Gateway 运行时注册表（自动生成，含模型快照时间戳，不入库）
+pt-gateway/registry.json
+registry.json
+*.registry.json
